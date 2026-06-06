@@ -1,0 +1,14 @@
+# Build artifacts
+obj/
+kernel.bin
+kernel.o
+boot.bin
+*.o
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+*.swp
+*~
