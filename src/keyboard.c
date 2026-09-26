@@ -37,6 +37,7 @@ static const char scancode_ascii_shift[128] = {
 #define SC_CAPSLOCK 0x3A
 #define SC_RELEASE  0x80
 
+volatile uint32_t keyboard_irqs = 0;
 static volatile int shift_held = 0;
 static volatile int caps_lock  = 0;
 
@@ -49,6 +50,7 @@ static volatile int  buf_tail = 0;
 void keyboard_handler(void) {
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
     uint8_t key      = scancode & 0x7F;
+    keyboard_irqs++;
 
     /* Modifiers: Shift is tracked on press and release, Caps Lock toggles on press */
     if (key == SC_LSHIFT || key == SC_RSHIFT) {
@@ -57,6 +59,14 @@ void keyboard_handler(void) {
         caps_lock = !caps_lock;
     } else if (!(scancode & SC_RELEASE)) {   /* bit 7 set = key release, ignore */
         char c = shift_held ? scancode_ascii_shift[key] : scancode_ascii[key];
+        /* Arrows (E0-prefixed; the E0 byte itself is dropped as a 'release') and F1-F4 */
+        switch (scancode) {
+            case 0x48: c = (char)K_UP;    break;
+            case 0x50: c = (char)K_DOWN;  break;
+            case 0x4B: c = (char)K_LEFT;  break;
+            case 0x4D: c = (char)K_RIGHT; break;
+            case 0x3B: case 0x3C: case 0x3D: case 0x3E: c = (char)(K_F1 + scancode - 0x3B); break;
+        }
         /* Caps Lock inverts case for letters only */
         if (caps_lock && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
             c ^= 0x20;

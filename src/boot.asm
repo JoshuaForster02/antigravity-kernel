@@ -1,30 +1,31 @@
-; boot.asm - Minimal Multiboot Header
-MB_MAGIC     equ 0x1BADB002          ; Multiboot magic number
-MB_FLAGS     equ 1 << 0 | 1 << 1     ; Align modules, provide memory map
+; boot.asm - Multiboot header (with video mode request) + entry
+MB_MAGIC     equ 0x1BADB002
+MB_FLAGS     equ 1 << 0 | 1 << 1 | 1 << 2   ; align modules, memory map, video mode
 MB_CHECKSUM  equ -(MB_MAGIC + MB_FLAGS)
 
 section .multiboot
+    align 4
     dd MB_MAGIC
     dd MB_FLAGS
     dd MB_CHECKSUM
+    dd 0, 0, 0, 0, 0        ; address fields (unused: ELF kernel, flag 16 not set)
+    dd 0                    ; mode_type: 0 = linear framebuffer
+    dd 1024, 768, 32        ; preferred width, height, depth
 
 section .bss
     align 16
     stack_bottom:
-        resb 16384 ; 16 KiB stack
+        resb 32768 ; 32 KiB stack
     stack_top:
 
 section .text
     global _start:function (_start.end - _start)
     _start:
-        ; Set up stack
         mov esp, stack_top
-
-        ; Call the C kernel
+        push ebx                ; multiboot_info*
+        push eax                ; multiboot magic
         extern kernel_main
         call kernel_main
-
-        ; Infinite loop if kernel returns
         cli
     .hang:
         hlt

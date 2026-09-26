@@ -102,6 +102,26 @@ keyboard_handler_wrapper:
     popad
     iretd
 
+; ── PIT timer (IRQ0 → INT 0x20) and PS/2 mouse (IRQ12 → INT 0x2C) ─────────────
+global timer_handler_wrapper
+global mouse_handler_wrapper
+extern timer_handler
+extern mouse_handler
+
+timer_handler_wrapper:
+    pushad
+    cld
+    call timer_handler
+    popad
+    iretd
+
+mouse_handler_wrapper:
+    pushad
+    cld
+    call mouse_handler
+    popad
+    iretd
+
 ; ── Catch-all no-op handler (unused IRQ/software vectors 32-255) ─────────────
 global ignore_handler
 

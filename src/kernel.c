@@ -1,178 +1,96 @@
-/* kernel.c — Antigravity OS  //  Flynn's OS aesthetic
- * Bare-metal i686 kernel: VGA text mode, keyboard input, mini-shell.
- * Logic is split into terminal.c | pic.c | idt.c | keyboard.c
+/* kernel.c — ENCOM OS-12 (Antigravity kernel)
+ * Boot: GDT -> IDT -> PIC -> PIT/keyboard/mouse -> graphical desktop.
+ * Without a linear framebuffer it falls back to the VGA text-mode shell.
  */
 #include "terminal.h"
 #include "gdt.h"
 #include "idt.h"
 #include "pic.h"
 #include "keyboard.h"
+#include "timer.h"
+#include "mouse.h"
+#include "serial.h"
+#include "fb.h"
+#include "gui.h"
+#include "shell.h"
+#include "system.h"
+#include "multiboot.h"
 #include "io.h"
-#include "string.h"
 #include <stdint.h>
-#include <stddef.h>
 
-/* ── Boot splash ──────────────────────────────────────────────────────────── */
-static void print_splash(void) {
-    terminal_setcolor(vga_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK));
+struct sysinfo sys = { 0, "unknown", 0, "" };
+
+static void cpu_brand(char* out) {
+    uint32_t r[4];
+    __asm__ volatile ("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(0x80000000));
+    if (r[0] < 0x80000004) { out[0] = 0; return; }
+    uint32_t* o = (uint32_t*)out;
+    for (uint32_t leaf = 0x80000002; leaf <= 0x80000004; leaf++, o += 4)
+        __asm__ volatile ("cpuid" : "=a"(o[0]), "=b"(o[1]), "=c"(o[2]), "=d"(o[3]) : "a"(leaf));
+    out[48] = 0;
+    char* s = out; while (*s == ' ') s++;               /* brand strings are often left-padded */
+    char* d = out; while (*s) *d++ = *s++; *d = 0;
+}
+
+/* ── VGA text-mode console (fallback when there is no framebuffer) ─────────── */
+static const uint8_t text_colors[] = {
+    VGA_COLOR_WHITE, VGA_COLOR_LIGHT_CYAN, VGA_COLOR_LIGHT_GREEN, VGA_COLOR_LIGHT_RED, VGA_COLOR_DARK_GREY };
+static void text_out(const char* s, int style) {
+    terminal_setcolor(vga_color(text_colors[style], VGA_COLOR_BLACK));
+    terminal_writestring(s);
+    serial_write(s);
+}
+
+static void text_mode_shell(void) {
+    terminal_initialize();
+    terminal_setcolor(vga_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
     terminal_writestring(
         "+==============================================================+\n"
-        "|                                                              |\n"
-        "|       A N T I G R A V I T Y   O S   //   v 0 . 3             |\n"
-        "|            bare-metal kernel  |  Flynn mode active           |\n"
-        "|                                                              |\n"
-        "+==============================================================+\n\n"
-    );
+        "|                    E N C O M   O S - 1 2                     |\n"
+        "|           text mode  |  no linear framebuffer found          |\n"
+        "+==============================================================+\n\n");
+    shell_out = text_out; shell_clear = terminal_clear; shell_open_app = 0;
+    shell_out("  Type 'help' for commands.\n\n", S_DIM);
 
-    const char* labels[] = {
-        "  >> GDT (FLAT 4 GIB)      ",
-        "  >> INTERRUPT DESCRIPTOR  ",
-        "  >> PIC REMAPPED (0x20)   ",
-        "  >> KEYBOARD DRIVER IRQ1  ",
-        "  >> INTERRUPTS            ",
-        0
-    };
-    const char* status[] = {
-        "[ OK ]\n",
-        "[ OK ]\n",
-        "[ OK ]\n",
-        "[ OK ]\n",
-        "[ ACTIVE ]\n",
-        0
-    };
-    for (int i = 0; labels[i]; i++) {
-        terminal_setcolor(vga_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
-        terminal_writestring(labels[i]);
-        terminal_setcolor(vga_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
-        terminal_writestring(status[i]);
-    }
-
-    terminal_setcolor(vga_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
-    terminal_writestring("\n  All systems online.  Type 'help' for commands.\n\n");
-}
-
-/* ── Shell helpers ────────────────────────────────────────────────────────── */
-static void print_prompt(void) {
-    terminal_setcolor(vga_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK));
-    terminal_writestring("[flynn@antigravity]> ");
-    terminal_setcolor(vga_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
-}
-
-static void exec_cmd(const char* cmd) {
-    terminal_putchar('\n');
-
-    if (strcmp(cmd, "") == 0) {
-        /* empty */
-    } else if (strcmp(cmd, "help") == 0) {
-        terminal_setcolor(vga_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
-        terminal_writestring("  Commands:\n");
-        terminal_setcolor(vga_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
-        terminal_writestring(
-            "    help     -- show this message\n"
-            "    clear    -- clear the screen\n"
-            "    sysinfo  -- system information\n"
-            "    about    -- about Antigravity OS\n"
-            "    echo     -- echo text  (echo <text>)\n"
-            "    derez    -- trigger a CPU exception (test panic screen)\n"
-            "    reboot   -- reboot the system\n"
-            "    halt     -- halt the CPU\n\n"
-        );
-    } else if (strcmp(cmd, "clear") == 0) {
-        terminal_clear();
-    } else if (strcmp(cmd, "sysinfo") == 0) {
-        terminal_setcolor(vga_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
-        terminal_writestring("  SYSTEM INFORMATION\n");
-        terminal_setcolor(vga_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
-        terminal_writestring(
-            "  OS        Antigravity OS v0.3\n"
-            "  Arch      i686  (32-bit protected mode)\n"
-            "  Bootload  GRUB Multiboot\n"
-            "  Kernel    bare-metal, no libc\n"
-            "  VGA       80x25 text mode @ 0xB8000\n"
-            "  Stack     16 KiB BSS\n"
-            "  Load addr 1 MiB\n\n"
-        );
-    } else if (strcmp(cmd, "about") == 0) {
-        terminal_setcolor(vga_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK));
-        terminal_writestring("  Antigravity OS  --  Inspired by Flynn's OS (TRON Legacy)\n");
-        terminal_setcolor(vga_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
-        terminal_writestring(
-            "  A bare-metal hobby kernel written in C and x86 Assembly.\n"
-            "  Part of the Antigravity project.\n"
-            "  github.com/JoshuaForster02/antigravity-kernel\n\n"
-        );
-    } else if (strcmp(cmd, "reboot") == 0) {
-        terminal_writestring("  Rebooting ...\n");
-        /* Pulse CPU reset via keyboard controller */
-        uint8_t v = 0x02;
-        while (v & 0x02) v = inb(0x64);
-        outb(0x64, 0xFE);
-        /* Fallback: triple fault */
+    static char buf[256];
+    int len = 0;
+    shell_prompt();
+    for (;;) {
         __asm__ volatile ("cli");
-        struct idt_ptr_t null_idt = {0, 0};
-        __asm__ volatile ("lidt (%0)" : : "r"(&null_idt));
-        __asm__ volatile ("int $3");
-    } else if (strcmp(cmd, "halt") == 0) {
-        terminal_writestring("  System halted. Safe to power off.\n");
-        __asm__ volatile ("cli; hlt");
-    } else if (strcmp(cmd, "derez") == 0) {
-        /* Real #DE fault (not optimisable away) -> exception_handler */
-        __asm__ volatile ("xor %%ecx, %%ecx\n\tdiv %%ecx" : : : "eax", "ecx", "edx");
-    } else if (strncmp(cmd, "echo ", 5) == 0) {
-        terminal_writestring("  ");
-        terminal_writestring(cmd + 5);
-        terminal_writestring("\n\n");
-    } else {
-        terminal_setcolor(vga_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
-        terminal_writestring("  Unknown command: ");
-        terminal_writestring(cmd);
-        terminal_writestring("\n  Type 'help' for commands.\n\n");
-        terminal_setcolor(vga_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
+        if (!keyboard_available()) { __asm__ volatile ("sti; hlt"); continue; }
+        __asm__ volatile ("sti");
+        unsigned char c = (unsigned char)keyboard_getchar();
+        if (c == '\n') { buf[len] = 0; terminal_putchar('\n'); shell_exec(buf); len = 0; shell_prompt(); }
+        else if (c == '\b') { if (len > 0) { len--; terminal_delete_last(); } }
+        else if (c >= 32 && c < 0x80 && len < 254) { buf[len++] = (char)c; terminal_putchar((char)c); }
     }
 }
 
-/* ── Entry point ──────────────────────────────────────────────────────────── */
-void kernel_main(void) {
-    terminal_initialize();
-    print_splash();
+void kernel_main(uint32_t magic, struct multiboot_info* mbi) {
+    serial_init();
+    serial_write("\nENCOM OS-12 / Antigravity kernel v0.4\n");
+
+    if (magic == MULTIBOOT_MAGIC && mbi) {
+        if (mbi->flags & 1) sys.mem_kb = mbi->mem_lower + mbi->mem_upper;
+        if (mbi->flags & (1u << 9)) sys.loader = (const char*)mbi->boot_loader_name;
+    }
+    cpu_brand(sys.cpu);
 
     gdt_init();
     idt_init();
     pic_remap(0x20, 0x28);
+    timer_init();
 
-    /* Mask all IRQs except IRQ1 (keyboard) */
-    outb(PIC1_DATA, 0xFD);  /* 1111 1101 */
-    outb(PIC2_DATA, 0xFF);
+    sys.gfx = fb_init(mbi, magic);
+    if (sys.gfx) mouse_init(fb_w, fb_h);
 
+    /* Unmask IRQ0 timer, IRQ1 keyboard, IRQ2 cascade (+ IRQ12 mouse in GUI mode) */
+    outb(PIC1_DATA, 0xF8);
+    outb(PIC2_DATA, sys.gfx ? 0xEF : 0xFF);
     __asm__ volatile ("sti");
 
-    /* Shell loop */
-    static char buf[256];
-    int len = 0;
-    print_prompt();
-
-    while (1) {
-        /* Sleep until the next IRQ instead of busy-polling. cli -> check -> sti;hlt
-           is race-free: sti only takes effect after hlt, so no IRQ slips in between. */
-        __asm__ volatile ("cli");
-        if (!keyboard_available()) {
-            __asm__ volatile ("sti; hlt");
-            continue;
-        }
-        __asm__ volatile ("sti");
-        {
-            char c = keyboard_getchar();
-            if (c == '\n') {
-                buf[len] = '\0';
-                exec_cmd(buf);
-                len = 0;
-                print_prompt();
-            } else if (c == '\b') {
-                if (len > 0) { len--; terminal_delete_last(); }
-            } else if (len < 254) {
-                buf[len++] = c;
-                terminal_putchar(c);
-            }
-        }
-    }
+    if (!sys.gfx) { serial_write("no framebuffer -> text mode\n"); text_mode_shell(); }
+    serial_write("framebuffer: "); serial_write(fb_source); serial_write("\n");
+    gui_boot_sequence();
+    gui_run();
 }
