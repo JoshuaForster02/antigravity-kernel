@@ -12,3 +12,5 @@ boot.bin
 .vscode/
 *.swp
 *~
+build/
+*.iso

@@ -1,0 +1,26 @@
+name: build & boot
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y nasm gcc-multilib qemu-system-x86 grub-pc-bin grub-common xorriso mtools
+      - name: Build kernel
+        run: make
+      - name: Boot smoke test (Multiboot, BGA framebuffer)
+        run: make test
+      - name: Build ISO
+        run: make iso
+      - name: Boot smoke test (GRUB ISO, VBE framebuffer)
+        run: make test-iso
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: encom-os-iso
+          path: encom-os.iso

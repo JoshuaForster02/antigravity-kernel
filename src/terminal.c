@@ -1,5 +1,6 @@
 #include "terminal.h"
 #include "string.h"
+#include "io.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -13,6 +14,13 @@ static uint8_t term_color;
 
 static inline uint16_t vga_entry(char c, uint8_t color) {
     return (uint16_t)(unsigned char)c | (uint16_t)color << 8;
+}
+
+/* Move the blinking hardware cursor (CRT controller, index 0x0E/0x0F) */
+static void terminal_update_cursor(void) {
+    uint16_t pos = (uint16_t)(term_row * VGA_WIDTH + term_col);
+    outb(0x3D4, 0x0F); outb(0x3D5, (uint8_t)(pos & 0xFF));
+    outb(0x3D4, 0x0E); outb(0x3D5, (uint8_t)(pos >> 8));
 }
 
 /* Scroll the entire screen up one line */
@@ -60,6 +68,7 @@ void terminal_putchar(char c) {
     }
     if (term_row >= VGA_HEIGHT)
         terminal_scroll();
+    terminal_update_cursor();
 }
 
 void terminal_write(const char* data, size_t size) {
@@ -77,6 +86,7 @@ void terminal_clear(void) {
             VGA_BUFFER[y * VGA_WIDTH + x] = vga_entry(' ', term_color);
     term_row = 0;
     term_col = 0;
+    terminal_update_cursor();
 }
 
 /* Erase the character to the left of the cursor */
@@ -88,4 +98,5 @@ void terminal_delete_last(void) {
         term_col = VGA_WIDTH - 1;
     }
     VGA_BUFFER[term_row * VGA_WIDTH + term_col] = vga_entry(' ', term_color);
+    terminal_update_cursor();
 }
