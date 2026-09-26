@@ -30,3 +30,5 @@ section .text
         hlt
         jmp .hang
     .end:
+
+section .note.GNU-stack noalloc noexec nowrite progbits

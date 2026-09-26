@@ -3,6 +3,7 @@
  * Logic is split into terminal.c | pic.c | idt.c | keyboard.c
  */
 #include "terminal.h"
+#include "gdt.h"
 #include "idt.h"
 #include "pic.h"
 #include "keyboard.h"
@@ -17,14 +18,14 @@ static void print_splash(void) {
     terminal_writestring(
         "+==============================================================+\n"
         "|                                                              |\n"
-        "|       A N T I G R A V I T Y   O S   //   v 0 . 2           |\n"
-        "|            bare-metal kernel  |  Flynn mode active          |\n"
+        "|       A N T I G R A V I T Y   O S   //   v 0 . 3             |\n"
+        "|            bare-metal kernel  |  Flynn mode active           |\n"
         "|                                                              |\n"
         "+==============================================================+\n\n"
     );
 
     const char* labels[] = {
-        "  >> MEMORY SUBSYSTEM      ",
+        "  >> GDT (FLAT 4 GIB)      ",
         "  >> INTERRUPT DESCRIPTOR  ",
         "  >> PIC REMAPPED (0x20)   ",
         "  >> KEYBOARD DRIVER IRQ1  ",
@@ -72,6 +73,7 @@ static void exec_cmd(const char* cmd) {
             "    sysinfo  -- system information\n"
             "    about    -- about Antigravity OS\n"
             "    echo     -- echo text  (echo <text>)\n"
+            "    derez    -- trigger a CPU exception (test panic screen)\n"
             "    reboot   -- reboot the system\n"
             "    halt     -- halt the CPU\n\n"
         );
@@ -82,7 +84,7 @@ static void exec_cmd(const char* cmd) {
         terminal_writestring("  SYSTEM INFORMATION\n");
         terminal_setcolor(vga_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
         terminal_writestring(
-            "  OS        Antigravity OS v0.2\n"
+            "  OS        Antigravity OS v0.3\n"
             "  Arch      i686  (32-bit protected mode)\n"
             "  Bootload  GRUB Multiboot\n"
             "  Kernel    bare-metal, no libc\n"
@@ -113,6 +115,9 @@ static void exec_cmd(const char* cmd) {
     } else if (strcmp(cmd, "halt") == 0) {
         terminal_writestring("  System halted. Safe to power off.\n");
         __asm__ volatile ("cli; hlt");
+    } else if (strcmp(cmd, "derez") == 0) {
+        /* Real #DE fault (not optimisable away) -> exception_handler */
+        __asm__ volatile ("xor %%ecx, %%ecx\n\tdiv %%ecx" : : : "eax", "ecx", "edx");
     } else if (strncmp(cmd, "echo ", 5) == 0) {
         terminal_writestring("  ");
         terminal_writestring(cmd + 5);
@@ -131,6 +136,7 @@ void kernel_main(void) {
     terminal_initialize();
     print_splash();
 
+    gdt_init();
     idt_init();
     pic_remap(0x20, 0x28);
 
@@ -146,7 +152,15 @@ void kernel_main(void) {
     print_prompt();
 
     while (1) {
-        if (keyboard_available()) {
+        /* Sleep until the next IRQ instead of busy-polling. cli -> check -> sti;hlt
+           is race-free: sti only takes effect after hlt, so no IRQ slips in between. */
+        __asm__ volatile ("cli");
+        if (!keyboard_available()) {
+            __asm__ volatile ("sti; hlt");
+            continue;
+        }
+        __asm__ volatile ("sti");
+        {
             char c = keyboard_getchar();
             if (c == '\n') {
                 buf[len] = '\0';
